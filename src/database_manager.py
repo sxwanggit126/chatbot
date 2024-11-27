@@ -1,99 +1,190 @@
-# 数据库管理模块
-# 负责处理数据库连接、表创建、消息存储和检索
-# 使用 MySQL 作为持久化存储
-
-import streamlit as st
-import mysql.connector
-from mysql.connector import Error
+# src/database_manager.py
+import pymysql
+from pymysql.cursors import DictCursor
+from contextlib import contextmanager
+import logging
+from typing import List, Dict, Optional
+from datetime import datetime
+import json
 import uuid
 
+
 class DatabaseManager:
-    """
-    数据库管理类，处理聊天会话和消息的数据库操作
+    def __init__(self, config: Dict):
+        """初始化数据库配置"""
+        self.db_config = {
+            'host': config['mysql']['host'],
+            'user': config['mysql']['user'],
+            'password': config['mysql']['password'],
+            'database': config['mysql']['database'],
+            'charset': 'utf8mb4',
+            'cursorclass': DictCursor
+        }
 
-    主要功能：
-    1. 建立数据库连接
-    2. 创建必要的数据库表
-    3. 管理会话和消息存储
-    """
-    def __init__(self, config):
-        """
-        初始化数据库连接
-
-        参数:
-        - config (dict): 数据库配置信息
-        """
+    @contextmanager
+    def get_connection(self):
+        """获取数据库连接"""
+        conn = pymysql.connect(**self.db_config)
         try:
-            # 使用配置信息建立数据库连接
-            self.connection = mysql.connector.connect(
-                host=config['mysql']['host'],
-                database=config['mysql']['database'],
-                user=config['mysql']['user'],
-                password=config['mysql']['password']
-            )
-            # 创建游标对象，支持字典形式返回结果
-            self.cursor = self.connection.cursor(dictionary=True)
-        except Error as e:
-            st.error(f"数据库连接错误: {e}")
-            raise
+            yield conn
+        finally:
+            conn.close()
 
-    def get_or_create_session(self, session_id=None):
-        """
-        获取或创建新的会话ID
-
-        参数:
-        - session_id (str, 可选): 现有会话ID
-
-        返回:
-        - str: 会话ID
-        """
-        if not session_id:
-            # 生成新的唯一会话ID
-            session_id = str(uuid.uuid4())
-            # 将新会话插入数据库
-            insert_query = "INSERT INTO chat_sessions (session_id) VALUES (%s)"
-            self.cursor.execute(insert_query, (session_id,))
-            self.connection.commit()
-        return session_id
-
-    def save_message(self, session_id, role, content):
-        """
-        保存聊天消息到数据库
-
-        参数:
-        - session_id (str): 会话ID
-        - role (str): 消息角色（user/assistant）
-        - content (str): 消息内容
-        """
-        try:
-            insert_query = """
-            INSERT INTO chat_messages (session_id, role, content)
-            VALUES (%s, %s, %s)
-            """
-            self.cursor.execute(insert_query, (session_id, role, content))
-            self.connection.commit()
-        except Error as e:
-            st.error(f"保存消息错误: {e}")
-
-    def get_session_messages(self, session_id):
-        """
-        获取特定会话的所有消息
-
-        参数:
-        - session_id (str): 会话ID
-
-        返回:
-        - list: 消息列表，每个消息是一个字典
-        """
-        try:
-            query = """
-            SELECT role, content
-            FROM chat_messages
-            WHERE session_id = %s
-            ORDER BY timestamp
-            """
-            self.cursor.execute(query, (session_id,))
-            return [{"role": msg['role'], "content": msg['content']} for msg in self.cursor.fetchall()]
-        except Error as e:
-            st.error(f"获取消息错误: {e}")
+    def get_sales_records(self, customer_name: Optional[str] = None) -> List[Dict]:
+        """获取销售记录"""
+        if not customer_name:
             return []
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                try:
+                    # 先尝试精确匹配
+                    sql = """
+                    SELECT 
+                        id,
+                        customer,
+                        entry_date,
+                        amount,
+                        IFNULL(total_received, 0) as total_received,
+                        IFNULL(remaining_amount, 0) as remaining_amount
+                    FROM sales_records 
+                    WHERE customer = %s
+                    ORDER BY entry_date DESC
+                    """
+
+                    cursor.execute(sql, (customer_name,))
+                    results = cursor.fetchall()
+
+                    # 如果没有找到，尝试模糊匹配
+                    if not results:
+                        fuzzy_sql = """
+                        SELECT 
+                            id,
+                            customer,
+                            entry_date,
+                            amount,
+                            IFNULL(total_received, 0) as total_received,
+                            IFNULL(remaining_amount, 0) as remaining_amount
+                        FROM sales_records 
+                        WHERE customer LIKE %s
+                        ORDER BY entry_date DESC
+                        """
+                        cursor.execute(fuzzy_sql, (f'%{customer_name}%',))
+                        results = cursor.fetchall()
+
+                    # 转换日期格式为字符串
+                    for row in results:
+                        if isinstance(row['entry_date'], datetime):
+                            row['entry_date'] = row['entry_date'].strftime('%Y-%m-%d %H:%M:%S')
+
+                    return results
+
+                except Exception as e:
+                    logging.error(f"查询销售记录失败: {str(e)}", exc_info=True)
+                    return []
+
+    def save_message(self, session_id: str, role: str, content: str,
+                     parent_message_id: Optional[int] = None) -> int:
+        """保存消息"""
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                try:
+                    sql = """
+                    INSERT INTO chat_messages 
+                    (session_id, role, content, parent_message_id) 
+                    VALUES (%s, %s, %s, %s)
+                    """
+                    cursor.execute(sql, (session_id, role, content, parent_message_id))
+                    conn.commit()
+                    return cursor.lastrowid
+                except Exception as e:
+                    logging.error(f"保存消息失败: {str(e)}", exc_info=True)
+                    conn.rollback()
+                    raise
+
+    def get_session_messages(self, session_id: str) -> List[Dict]:
+        """获取会话消息"""
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                sql = """
+                SELECT role, content
+                FROM chat_messages
+                WHERE session_id = %s
+                ORDER BY timestamp
+                """
+                cursor.execute(sql, (session_id,))
+                return cursor.fetchall()
+
+    def get_or_create_session(self, session_id: Optional[str] = None) -> str:
+        """获取或创建会话"""
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                if not session_id:
+                    session_id = str(uuid.uuid4())
+                    cursor.execute(
+                        "INSERT INTO chat_sessions (session_id) VALUES (%s)",
+                        (session_id,)
+                    )
+                    conn.commit()
+                return session_id
+
+    def save_structured_query(self,
+                              session_id: str,
+                              message_id: int,
+                              query_type: str,
+                              query_params: Dict,
+                              context_info: Dict) -> int:
+        """保存结构化查询"""
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                try:
+                    sql = """
+                    INSERT INTO structured_queries 
+                    (session_id, message_id, query_type, query_params, context_messages)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """
+                    cursor.execute(sql, (
+                        session_id,
+                        message_id,
+                        query_type,
+                        json.dumps(query_params, ensure_ascii=False),
+                        json.dumps(context_info, ensure_ascii=False)
+                    ))
+                    conn.commit()
+                    return cursor.lastrowid
+                except Exception as e:
+                    logging.error(f"保存结构化查询失败: {str(e)}", exc_info=True)
+                    conn.rollback()
+                    raise
+
+    def log_query_execution(self,
+                            structured_query_id: int,
+                            raw_query: str,
+                            execution_time: float,
+                            result_count: int) -> None:
+        """
+        记录查询执行情况
+        Args:
+            structured_query_id: 结构化查询ID
+            raw_query: 原始查询语句
+            execution_time: 执行时间
+            result_count: 结果数量
+        """
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                try:
+                    sql = """
+                    INSERT INTO query_logs 
+                    (structured_query_id, raw_query, execution_time, result_count)
+                    VALUES (%s, %s, %s, %s)
+                    """
+                    cursor.execute(sql, (
+                        structured_query_id,
+                        raw_query,
+                        execution_time,
+                        result_count
+                    ))
+                    conn.commit()
+                except Exception as e:
+                    logging.error(f"保存查询日志失败: {str(e)}", exc_info=True)
+                    conn.rollback()

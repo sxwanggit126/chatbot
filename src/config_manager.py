@@ -1,40 +1,53 @@
-# 配置管理模块
-# 负责从 JSON 配置文件加载和解析配置信息
-# 提供静态方法加载配置，支持错误处理
-
+# src/config_manager.py
+from typing import Dict, Optional
 import json
-import streamlit as st
+import logging
+from pathlib import Path
+
 
 class ConfigManager:
-    """
-    配置管理类，提供配置文件加载方法
+    """配置管理类，负责加载和验证配置"""
 
-    主要功能：
-    1. 从 JSON 文件读取配置
-    2. 处理配置文件读取过程中可能出现的异常
-    """
     @staticmethod
-    def load_config(config_path='config/config.json'):
+    def load_config(config_path: str = 'config/config.json') -> Optional[Dict]:
         """
         从指定路径加载配置文件
-
-        参数:
-        - config_path (str): 配置文件路径，默认为 'config/config.json'
-
-        返回:
-        - dict: 解析后的配置字典
-        - None: 配置加载失败
+        Args:
+            config_path: 配置文件路径
+        Returns:
+            加载的配置字典，失败则返回None
         """
         try:
-            # 使用 utf-8 编码打开文件
-            with open(config_path, 'r', encoding='utf-8') as f:
-                # 解析 JSON 配置
-                return json.load(f)
-        except FileNotFoundError:
-            # 处理文件未找到的异常
-            st.error(f"配置文件 {config_path} 未找到")
+            config_file = Path(config_path)
+            if not config_file.exists():
+                raise FileNotFoundError(f"配置文件不存在: {config_path}")
+
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+
+            ConfigManager._validate_config(config)
+            return config
+
+        except Exception as e:
+            logging.error(f"加载配置失败: {str(e)}")
             return None
-        except json.JSONDecodeError:
-            # 处理 JSON 解析错误
-            st.error(f"配置文件 {config_path} 解析错误")
-            return None
+
+    @staticmethod
+    def _validate_config(config: Dict) -> None:
+        """
+        验证配置完整性
+        Args:
+            config: 配置字典
+        Raises:
+            ValueError: 配置不完整或无效
+        """
+        required_sections = ['mysql', 'openai', 'system_prompts', 'app']
+        for section in required_sections:
+            if section not in config:
+                raise ValueError(f"配置缺少必要部分: {section}")
+
+        # 验证数据库配置
+        required_mysql = ['host', 'database', 'user', 'password']
+        for field in required_mysql:
+            if field not in config['mysql']:
+                raise ValueError(f"数据库配置缺少字段: {field}")

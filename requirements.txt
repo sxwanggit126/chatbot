@@ -1,3 +1,3 @@
-streamlit
-openai
-mysql-connector-python
+streamlit>=1.24.0
+openai>=1.3.0
+pymysql>=1.1.0
