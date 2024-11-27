@@ -1,0 +1,11 @@
+{
+    "openai": {
+        "api_key": "your_openai_api_key_here"
+    },
+    "mysql": {
+        "host": "192.168.41.31",
+        "database": "chatbot_db",
+        "user": "root",
+        "password": "123456"
+    }
+}
